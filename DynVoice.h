@@ -49,6 +49,7 @@ public:
 
 	void linkedTo(unsigned int number);
 	void unlinked();
+	void stillLinked();
 
 	bool read(CDMRData& data);
 

@@ -58,6 +58,9 @@ m_debug(false),
 m_voiceEnabled(true),
 m_voiceLanguage("en_GB"),
 m_voiceDirectory(),
+m_voiceDisconnect(false),
+m_voiceDisconnectIds(),
+m_voiceDisconnectCommand(),
 m_logDisplayLevel(0U),
 m_logMQTTLevel(0U),
 m_infoCallsign("G9BF"),
@@ -233,6 +236,18 @@ bool CConf::read()
 				m_voiceLanguage = value;
 			else if (::strcmp(key, "Directory") == 0)
 				m_voiceDirectory = value;
+			else if (::strcmp(key, "Disconnect") == 0)
+				m_voiceDisconnect = ::atoi(value) == 1;
+			else if (::strcmp(key, "DisconnectIds") == 0) {
+				char* p = ::strtok(value, ",\r\n");
+				while (p != nullptr) {
+					unsigned int id = (unsigned int)::atoi(p);
+					if (id > 0U)
+						m_voiceDisconnectIds.push_back(id);
+					p = ::strtok(nullptr, ",\r\n");
+				}
+			} else if (::strcmp(key, "DisconnectCommand") == 0)
+				m_voiceDisconnectCommand = value;
 		} else if (section == SECTION::INFO) {
 			if (::strcmp(key, "Callsign") == 0)
 				m_infoCallsign = value;
@@ -552,6 +567,21 @@ std::string CConf::getVoiceLanguage() const
 std::string CConf::getVoiceDirectory() const
 {
 	return m_voiceDirectory;
+}
+
+bool CConf::getVoiceDisconnect() const
+{
+	return m_voiceDisconnect;
+}
+
+std::vector<unsigned int> CConf::getVoiceDisconnectIds() const
+{
+	return m_voiceDisconnectIds;
+}
+
+std::string CConf::getVoiceDisconnectCommand() const
+{
+	return m_voiceDisconnectCommand;
 }
 
 std::string CConf::getInfoCallsign() const

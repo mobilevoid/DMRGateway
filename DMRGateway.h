@@ -36,6 +36,8 @@
 #include "GPSD.h"
 
 #include <string>
+#include <memory>
+#include <mutex>
 
 enum class DMRGW_STATUS {
 	NONE,
@@ -46,6 +48,17 @@ enum class DMRGW_STATUS {
 struct CDMRGWExtStatus {
 	DMRGW_STATUS m_status;
 	unsigned int m_dmrNetwork;
+};
+
+struct CDisconnectResult {
+	unsigned int m_slotNo;
+	unsigned int m_tg;
+	bool         m_confirmed;
+};
+
+struct CDisconnectResults {
+	std::mutex                     m_mutex;
+	std::vector<CDisconnectResult> m_results;
 };
 
 class CDMRGateway
@@ -105,6 +118,13 @@ private:
 	bool                   m_networkXlxEnabled;
 	bool                   m_trunkingEnabled;
 	CRemoteControl*        m_remoteControl;
+	bool                   m_disconnectEnabled;
+	std::vector<unsigned int> m_disconnectIds;
+	std::string            m_disconnectCommand;
+	std::string            m_voiceDirectory;
+	std::string            m_voiceLanguage;
+	CDynVoice*             m_disconnectVoice[3U];
+	std::shared_ptr<CDisconnectResults> m_disconnectResults;
 
 	bool createMMDVM();
 	bool createDMRNetwork(unsigned int index);
@@ -121,6 +141,9 @@ private:
 	unsigned int getConfig(const std::string& name, unsigned char* buffer);
 
 	void processRadioPosition();
+	void disconnectSent(unsigned int rfSlotNo, unsigned int rfDstId, unsigned int index, const CDMRData& data);
+	void announceDisconnect(unsigned int slotNo, unsigned int tg, bool confirmed);
+	void processDisconnects();
 	void processTalkerAlias();
 	void createAPRS();
 	void processDynamicTGControl(const std::string& command);

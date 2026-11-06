@@ -40,9 +40,12 @@
 #include <algorithm>
 #include <cstdio>
 #include <vector>
+#include <thread>
+#include <cctype>
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -183,7 +186,14 @@ m_gpsd(nullptr),
 m_networkEnabled(nullptr),
 m_networkXlxEnabled(false),
 m_trunkingEnabled(false),
-m_remoteControl(nullptr)
+m_remoteControl(nullptr),
+m_disconnectEnabled(false),
+m_disconnectIds(),
+m_disconnectCommand(),
+m_voiceDirectory(),
+m_voiceLanguage(),
+m_disconnectVoice(),
+m_disconnectResults(std::make_shared<CDisconnectResults>())
 {
 	CUDPSocket::startup();
 
@@ -212,6 +222,9 @@ CDMRGateway::~CDMRGateway()
 
 	for (std::vector<CDynVoice*>::iterator it = m_dynVoices.begin(); it != m_dynVoices.end(); ++it)
 		delete* it;
+
+	delete m_disconnectVoice[1U];
+	delete m_disconnectVoice[2U];
 
 	delete m_rptRewrite;
 	delete m_xlxRewrite;
@@ -388,6 +401,28 @@ int CDMRGateway::run()
 				delete m_xlxVoice;
 				m_xlxVoice = nullptr;
 			}
+		}
+
+		m_disconnectEnabled = m_conf.getVoiceDisconnect();
+		if (m_disconnectEnabled) {
+			m_voiceDirectory    = directory;
+			m_voiceLanguage     = language;
+			m_disconnectIds     = m_conf.getVoiceDisconnectIds();
+			m_disconnectCommand = m_conf.getVoiceDisconnectCommand();
+
+			if (m_disconnectIds.empty())
+				m_disconnectIds.push_back(4000U);
+
+			std::string ids;
+			for (std::vector<unsigned int>::const_iterator it = m_disconnectIds.cbegin(); it != m_disconnectIds.cend(); ++it) {
+				if (!ids.empty())
+					ids += ",";
+				ids += std::to_string(*it);
+			}
+
+			LogInfo("    Disconnect: yes (%s)", ids.c_str());
+			if (!m_disconnectCommand.empty())
+				LogInfo("    Disconnect Command: %s", m_disconnectCommand.c_str());
 		}
 	}
 
@@ -605,6 +640,10 @@ int CDMRGateway::run()
 
 				PROCESS_RESULT result = PROCESS_RESULT::UNMATCHED;
 
+				unsigned int rfSlotNo = slotNo;
+				bool sent = false;
+				unsigned int sentIndex = 0U;
+
 				// A private call to one of [General] RFDropPC is for local use
 				// only and goes to no network.
 				if (flco == FLCO::USER_USER && std::find(rfDropPC.begin(), rfDropPC.end(), dstId) != rfDropPC.end()) {
@@ -636,6 +675,8 @@ int CDMRGateway::run()
 							) {
 								rewrite(m_dmrSrcRewrites[i], data, trace);
 								m_dmrNetworks[i]->write(data);
+								sent = true;
+								sentIndex = i;
 								m_extStatus[slotNo].m_status = DMRGW_STATUS::DMRNETWORK;
 								m_extStatus[slotNo].m_dmrNetwork = i;
 								timer[slotNo]->setTimeout(rfTimeout);
@@ -667,6 +708,8 @@ int CDMRGateway::run()
 							) {
 								rewrite(m_dmrSrcRewrites[i], data, trace);
 								m_dmrNetworks[i]->write(data);
+								sent = true;
+								sentIndex = i;
 								m_extStatus[slotNo].m_status = DMRGW_STATUS::DMRNETWORK;
 								m_extStatus[slotNo].m_dmrNetwork = i;
 								timer[slotNo]->setTimeout(rfTimeout);
@@ -678,6 +721,9 @@ int CDMRGateway::run()
 
 				if (result == PROCESS_RESULT::UNMATCHED && trace)
 					LogDebug("Rule Trace,\tnot matched so rejected");
+
+				if (sent && (data.getDataType() == DT_TERMINATOR_WITH_LC))
+					disconnectSent(rfSlotNo, dstId, sentIndex, data);
 			}
 		}
 
@@ -785,6 +831,16 @@ int CDMRGateway::run()
 				m_repeater->write(data);
 		}
 
+		processDisconnects();
+
+		for (unsigned int i = 1U; i < 3U; i++) {
+			if (m_disconnectVoice[i] != nullptr) {
+				ret = m_disconnectVoice[i]->read(data);
+				if (ret)
+					m_repeater->write(data);
+			}
+		}
+
 		unsigned int ms = stopWatch.elapsed();
 		stopWatch.start();
 
@@ -823,6 +879,11 @@ int CDMRGateway::run()
 
 		for (std::vector<CDynVoice*>::iterator it = m_dynVoices.begin(); it != m_dynVoices.end(); ++it)
 			(*it)->clock(ms);
+
+		for (unsigned int i = 1U; i < 3U; i++) {
+			if (m_disconnectVoice[i] != nullptr)
+				m_disconnectVoice[i]->clock(ms);
+		}
 
 		// Check timer for both slots & free if expired
 		for (unsigned int i = 1U; i < 3U; i++) {
@@ -1703,4 +1764,78 @@ void CDMRGateway::onCommand(const unsigned char* message, unsigned int length)
 	assert(gateway != nullptr);
 
 	gateway->remoteControl(std::string((char*)message, length));
+}
+
+void CDMRGateway::disconnectSent(unsigned int rfSlotNo, unsigned int rfDstId, unsigned int index, const CDMRData& data)
+{
+	if (!m_disconnectEnabled)
+		return;
+
+	if (std::find(m_disconnectIds.cbegin(), m_disconnectIds.cend(), rfDstId) == m_disconnectIds.cend())
+		return;
+
+	LogMessage("DMR Slot %u, disconnect to %u sent to %s", rfSlotNo, rfDstId, m_dmrName[index].c_str());
+
+	if (m_disconnectCommand.empty()) {
+		announceDisconnect(rfSlotNo, rfDstId, true);
+		return;
+	}
+
+	// Only pass the network name to the shell as a plain word
+	std::string name = m_dmrName[index];
+	for (std::string::iterator it = name.begin(); it != name.end(); ++it) {
+		if (!::isalnum((unsigned char)*it) && (*it != '.') && (*it != '-') && (*it != '_'))
+			*it = '_';
+	}
+	if (name.empty())
+		name = "_";
+
+	std::string command = m_disconnectCommand + " " + name + " " + std::to_string(data.getSlotNo()) + " " + std::to_string(rfSlotNo) + " " + std::to_string(rfDstId) + " " + std::to_string(data.getSrcId());
+
+	// The command may take some time, so run it away from the main loop
+	std::shared_ptr<CDisconnectResults> results = m_disconnectResults;
+	std::thread([results, command, rfSlotNo, rfDstId]() {
+		int ret = ::system(command.c_str());
+#if defined(_WIN32) || defined(_WIN64)
+		bool confirmed = ret == 0;
+#else
+		bool confirmed = (ret != -1) && WIFEXITED(ret) && (WEXITSTATUS(ret) == 0);
+#endif
+		std::lock_guard<std::mutex> lock(results->m_mutex);
+		results->m_results.push_back({rfSlotNo, rfDstId, confirmed});
+	}).detach();
+}
+
+void CDMRGateway::processDisconnects()
+{
+	std::vector<CDisconnectResult> results;
+
+	{
+		std::lock_guard<std::mutex> lock(m_disconnectResults->m_mutex);
+		results.swap(m_disconnectResults->m_results);
+	}
+
+	for (std::vector<CDisconnectResult>::const_iterator it = results.cbegin(); it != results.cend(); ++it)
+		announceDisconnect(it->m_slotNo, it->m_tg, it->m_confirmed);
+}
+
+void CDMRGateway::announceDisconnect(unsigned int slotNo, unsigned int tg, bool confirmed)
+{
+	delete m_disconnectVoice[slotNo];
+
+	m_disconnectVoice[slotNo] = new CDynVoice(m_voiceDirectory, m_voiceLanguage, m_id, slotNo, tg);
+	bool ret = m_disconnectVoice[slotNo]->open();
+	if (!ret) {
+		delete m_disconnectVoice[slotNo];
+		m_disconnectVoice[slotNo] = nullptr;
+		return;
+	}
+
+	if (confirmed) {
+		LogMessage("DMR Slot %u, disconnect to %u done", slotNo, tg);
+		m_disconnectVoice[slotNo]->unlinked();
+	} else {
+		LogMessage("DMR Slot %u, disconnect to %u not confirmed", slotNo, tg);
+		m_disconnectVoice[slotNo]->stillLinked();
+	}
 }

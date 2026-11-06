@@ -162,6 +162,14 @@ void CDynVoice::unlinked()
 	createVoice(words);
 }
 
+void CDynVoice::stillLinked()
+{
+	std::vector<std::string> words;
+	words.push_back("linked");
+
+	createVoice(words);
+}
+
 void CDynVoice::abort()
 {
 	for (std::vector<CDMRData*>::iterator it = m_data.begin(); it != m_data.end(); ++it)

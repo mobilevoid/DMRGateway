@@ -120,6 +120,9 @@ public:
 	bool         getVoiceEnabled() const;
 	std::string  getVoiceLanguage() const;
 	std::string  getVoiceDirectory() const;
+	bool         getVoiceDisconnect() const;
+	std::vector<unsigned int> getVoiceDisconnectIds() const;
+	std::string  getVoiceDisconnectCommand() const;
 
 	// The Info section
 	std::string  getInfoCallsign() const;
@@ -219,6 +222,9 @@ private:
 	bool         m_voiceEnabled;
 	std::string  m_voiceLanguage;
 	std::string  m_voiceDirectory;
+	bool         m_voiceDisconnect;
+	std::vector<unsigned int> m_voiceDisconnectIds;
+	std::string  m_voiceDisconnectCommand;
 
 	unsigned int m_logDisplayLevel;
 	unsigned int m_logMQTTLevel;
